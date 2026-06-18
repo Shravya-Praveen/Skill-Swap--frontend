@@ -4,15 +4,25 @@ let me = null;
 let users = [];
 let activeUser = null;
 let ws = null;
+let reconnectTimer = null;
+
+// ---------------- Config ----------------
+// Do NOT declare const API_BASE here again.
+// This avoids: Identifier 'API_BASE' has already been declared
+const BACKEND_API_BASE =
+  typeof API_BASE !== "undefined"
+    ? API_BASE.replace(/\/$/, "")
+    : "https://skill-swap-backend-cnqr.onrender.com";
+
+const BACKEND_WS_BASE =
+  typeof WS_BASE !== "undefined"
+    ? WS_BASE.replace(/\/$/, "")
+    : "wss://skill-swap-backend-cnqr.onrender.com";
 
 const ICONS = {
   offer: `<svg viewBox="0 0 24 24" fill="none"><path d="M12 2v20M2 12h20" stroke="currentColor" stroke-width="2" stroke-linecap="round" transform="rotate(45 12 12)"/></svg>`,
   want: `<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
 };
-
-// ---------------- Config ----------------
-const API_BASE = "https://skill-swap-backend-cnqr.onrender.com";
-const WS_BASE = "wss://skill-swap-backend-cnqr.onrender.com";
 
 // ---------------- Helpers ----------------
 function $(id) {
@@ -21,6 +31,7 @@ function $(id) {
 
 function initials(name) {
   if (!name) return "?";
+
   return name
     .split(" ")
     .map((w) => w[0])
@@ -30,7 +41,10 @@ function initials(name) {
 }
 
 function fmtTime(iso) {
+  if (!iso) return "";
+
   const d = new Date(iso + (iso.endsWith("Z") ? "" : "Z"));
+
   return d.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
@@ -44,14 +58,16 @@ function escapeHtml(s) {
 }
 
 async function api(path, options = {}) {
-  const headers = options.headers || {};
-  headers["Content-Type"] = "application/json";
+  const headers = {
+    ...(options.headers || {}),
+    "Content-Type": "application/json",
+  };
 
   if (token) {
     headers["Authorization"] = "Bearer " + token;
   }
 
-  const res = await fetch(API_BASE + path, {
+  const res = await fetch(BACKEND_API_BASE + path, {
     ...options,
     headers,
   });
@@ -77,12 +93,17 @@ document.querySelectorAll(".auth-tab").forEach((tab) => {
     });
 
     tab.classList.add("active");
-    $(tab.dataset.tab + "-form").classList.add("active");
+
+    const form = $(tab.dataset.tab + "-form");
+    if (form) {
+      form.classList.add("active");
+    }
   });
 });
 
 $("login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+
   $("login-error").textContent = "";
 
   try {
@@ -102,6 +123,7 @@ $("login-form").addEventListener("submit", async (e) => {
 
 $("register-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+
   $("register-error").textContent = "";
 
   try {
@@ -128,6 +150,7 @@ function onAuthed(data) {
   me = data.user || data;
 
   localStorage.setItem("skillswap_token", token);
+
   showApp();
 }
 
@@ -136,11 +159,17 @@ $("logout-btn").addEventListener("click", () => {
 
   token = null;
   me = null;
-  activeUser = null;
   users = [];
+  activeUser = null;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 
   if (ws) {
     ws.close();
+    ws = null;
   }
 
   $("app-screen").style.display = "none";
@@ -153,7 +182,9 @@ async function showApp() {
   $("app-screen").style.display = "flex";
 
   renderMeCard();
+
   await loadUsers();
+
   connectWS();
 }
 
@@ -163,8 +194,12 @@ function renderMeCard() {
   $("me-card").innerHTML = `
     <div class="me-name">${escapeHtml(me.name)}</div>
     <div class="me-skills">
-      <div class="me-skill-row">${ICONS.offer} Offers <b>${escapeHtml(me.skill_offered)}</b></div>
-      <div class="me-skill-row">${ICONS.want} Wants <b>${escapeHtml(me.skill_wanted)}</b></div>
+      <div class="me-skill-row">
+        ${ICONS.offer} Offers <b>${escapeHtml(me.skill_offered)}</b>
+      </div>
+      <div class="me-skill-row">
+        ${ICONS.want} Wants <b>${escapeHtml(me.skill_wanted)}</b>
+      </div>
     </div>
   `;
 }
@@ -172,7 +207,6 @@ function renderMeCard() {
 async function loadUsers() {
   const data = await api("/api/users");
 
-  // Backend may return either array OR { users: [...] }
   users = Array.isArray(data) ? data : data.users || [];
 
   renderUserList();
@@ -195,10 +229,13 @@ function renderUserList(flashId = null) {
   list.innerHTML = users
     .map(
       (u) => `
-      <div class="user-item ${
-        activeUser && activeUser.id === u.id ? "selected" : ""
-      } ${flashId === u.id ? "new-flash" : ""}"
-           data-id="${u.id}" tabindex="0">
+      <div 
+        class="user-item ${
+          activeUser && activeUser.id === u.id ? "selected" : ""
+        } ${flashId === u.id ? "new-flash" : ""}"
+        data-id="${u.id}" 
+        tabindex="0"
+      >
         <div class="avatar">${initials(u.name)}</div>
         <div class="user-item-text">
           <div class="user-item-name">${escapeHtml(u.name)}</div>
@@ -237,13 +274,16 @@ async function openChat(userId) {
   $("partner-name").textContent = activeUser.name;
 
   $("partner-skills").innerHTML = `
-    <span class="skill-pill offer">${ICONS.offer} ${escapeHtml(activeUser.skill_offered)}</span>
-    <span class="skill-pill want">${ICONS.want} ${escapeHtml(activeUser.skill_wanted)}</span>
+    <span class="skill-pill offer">
+      ${ICONS.offer} ${escapeHtml(activeUser.skill_offered)}
+    </span>
+    <span class="skill-pill want">
+      ${ICONS.want} ${escapeHtml(activeUser.skill_wanted)}
+    </span>
   `;
 
   const data = await api(`/api/messages/${userId}`);
 
-  // Backend may return either array OR { messages: [...] }
   const msgs = Array.isArray(data) ? data : data.messages || [];
 
   renderMessages(msgs);
@@ -281,6 +321,7 @@ function appendMessage(m) {
   const box = $("messages");
 
   const empty = box.querySelector(".messages-empty");
+
   if (empty) {
     empty.remove();
   }
@@ -297,6 +338,7 @@ function appendMessage(m) {
   `;
 
   box.appendChild(row);
+
   box.scrollTop = box.scrollHeight;
 }
 
@@ -325,11 +367,13 @@ $("message-form").addEventListener("submit", async (e) => {
 
 // ---------------- WebSocket ----------------
 function connectWS() {
+  if (!token) return;
+
   if (ws) {
     ws.close();
   }
 
-  ws = new WebSocket(`${WS_BASE}/ws/${token}`);
+  ws = new WebSocket(`${BACKEND_WS_BASE}/ws/${token}`);
 
   ws.onopen = () => {
     setConnStatus(true);
@@ -338,7 +382,11 @@ function connectWS() {
   ws.onclose = () => {
     setConnStatus(false);
 
-    setTimeout(() => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+    }
+
+    reconnectTimer = setTimeout(() => {
       if (token) {
         connectWS();
       }
@@ -355,7 +403,7 @@ function connectWS() {
     if (payload.type === "user_joined") {
       const u = payload.user;
 
-      if (u.id === me.id) return;
+      if (!me || u.id === me.id) return;
 
       if (!users.find((x) => x.id === u.id)) {
         users.push(u);
@@ -367,6 +415,7 @@ function connectWS() {
 
     if (payload.type === "message") {
       const m = payload.message;
+
       const otherId = m.sender_id === me.id ? m.receiver_id : m.sender_id;
 
       if (activeUser && activeUser.id === otherId) {
@@ -395,15 +444,16 @@ function setConnStatus(online) {
     try {
       const data = await api("/api/me");
 
-      // Backend may return either user object OR { user: {...} }
       me = data.user || data;
 
       showApp();
+
       return;
     } catch (err) {
       console.log("Auto login failed:", err.message);
 
       localStorage.removeItem("skillswap_token");
+
       token = null;
     }
   }
